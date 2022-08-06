@@ -1,7 +1,9 @@
 # The testing module requires faiss
 # So if you don't have that, then this import will break
+from trunk_baseline import Emotic
 from pytorch_metric_learning import losses, miners, samplers, trainers, testers, utils
 import torch.nn as nn
+from emotic_d import Emotic_DataLoader
 import record_keeper
 import pytorch_metric_learning.utils.logging_presets as logging_presets
 from torchvision import datasets, models, transforms
@@ -9,22 +11,24 @@ import torchvision
 import logging
 logging.getLogger().setLevel(logging.INFO)
 import os
-
+from scipy.io import loadmat
 import pytorch_metric_learning
 from pytorch_metric_learning.testers.base_tester import BaseTester
+#from resnet import resnet18
 
 logging.info("pytorch-metric-learning VERSION %s"%pytorch_metric_learning.__version__)
 logging.info("record_keeper VERSION %s"%record_keeper.__version__)
 
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, classification_report
 #from efficientnet_pytorch import EfficientNet
 import torch
 import numpy as np
 import pickle
 
+
+import sys
 import hydra
 from omegaconf import DictConfig
-
 
 # reprodcibile
 np.random.seed(42)
@@ -49,7 +53,7 @@ class OneShotTester(BaseTester):
             _, pred = output.topk(maxk, 1, True, True)
             pred = pred.t()
             correct = pred.eq(target.view(1, -1).expand_as(pred))
-    #             print(correct)
+        #             print(correct)
         return correct
 
 
@@ -71,10 +75,16 @@ class OneShotTester(BaseTester):
         query_labels = embeddings_and_labels["val"][1]
         reference_embeddings = embeddings_and_labels["samples"][0]
         reference_labels = embeddings_and_labels["samples"][1]
+        #print(reference_labels)
         knn_indices, knn_distances = utils.stat_utils.get_knn(reference_embeddings, query_embeddings, 1, False)
         knn_labels = reference_labels[knn_indices][:,0]
+        torch.set_printoptions(threshold=10000)
+        np.set_printoptions(threshold=sys.maxsize)
 
+        #print((knn_labels!=7).sum())
+        torch.set_printoptions(threshold=10000)
         accuracy = accuracy_score(knn_labels, query_labels)
+        #print(classification_report(knn_labels, query_labels, labels=[7,8,9,10,11,12]))
         print(accuracy)
         with open(self.embedding_filename+"_last", 'wb') as f:
             print("Dumping embeddings for new max_acc to file", self.embedding_filename+"_last")
@@ -82,7 +92,19 @@ class OneShotTester(BaseTester):
         accuracies["accuracy"] = accuracy
         keyname = self.accuracies_keyname("mean_average_precision_at_r") # accuracy as keyname not working
         accuracies[keyname] = accuracy
-
+def convert_color_to_index(semantic):
+    colors = loadmat('/home/kpeng/oneshot_metriclearning/emotic_dml/sl-dml/color150.mat')['colors']
+    #print(colors)
+    encoder_semantic = torch.zeros(semantic.size()[0],150,semantic.size()[2], semantic.size()[3]).cuda().permute(0,2,3,1)
+    semantic = semantic.permute(0,2,3,1)
+    #print(semantic.size())
+    for i in range(150):
+        #print(colors[i][0])
+        mask = ((semantic[:,:,:,0] == colors[i][0])&(semantic[:,:,:,1] == colors[i][1])&(semantic[:,:,:,2] == colors[i][2]))
+        
+        encoder_semantic[mask,:]=1
+    #print(encoder_semantic.size())
+    return encoder_semantic.permute(0,3,1,2)
 
 class MLP(nn.Module):
     # layer_sizes[0] is the dimension of the input
@@ -104,7 +126,69 @@ class MLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-
+class trunk_2(nn.Module):
+    def __init__(self,cfg):
+        super().__init__()
+        self.trunk_context = torchvision.models.__dict__[cfg.model.model_name](pretrained=cfg.model.pretrained)
+        self.trunk_body = torchvision.models.__dict__[cfg.model.model_name](pretrained=cfg.model.pretrained)
+        #self.trunk_semantic = torchvision.models.__dict__[cfg.model.model_name](pretrained=False)
+        self.trunk_context.fc = Identity()
+        self.trunk_body.fc = Identity()
+        #self.trunk_semantic.fc = Identity()
+        self.embedding = nn.Linear(512+512+512,512)
+        self.semantic = nn.Sequential(nn.Linear(150,256), nn.ReLU(),nn.BatchNorm1d(256), nn.Linear(256, 64))
+        #self.fc1 = nn.Linear(512, 256)
+        #self.fc2 = nn.Linear(512, 256)
+        #self.relu = nn.ReLU()
+        #self.embedding_2 = nn.Linear(512,512)
+        #self.dropout = nn.Dropout(0.5)
+        #self.normalize = nn.BatchNorm1d(1000)
+        #self.normalize_2 = nn.BatchNorm1d(256)
+        self.LSTM = nn.LSTM(1,16,2,bidirectional=True)
+        #self.LSTM.weight.data.normal_(0, 0.01)
+        #torch.nn.init.xavier_normal(self.LSTM)
+        for layer_p in self.LSTM._all_weights:
+            for p in layer_p:
+                if 'weight' in p:
+                    # print(p, a.__getattr__(p))
+                    torch.nn.init.normal(self.LSTM.__getattr__(p), 0.4, 0.002) # 0.1 0.002 valence cs 0.0 0.02 dominance csb
+                    #torch.nn.init.constant_(self.LSTM.__getattr__(p), 0)
+                    # print(p, a.__getattr__(p))
+        self.Lift = nn.Linear(150,64)
+        self.semantic = nn.Sequential(nn.Conv2d(150,64, kernel_size=3, stride=1, padding=1),nn.ReLU(), nn.BatchNorm2d(64))
+        self.attention =nn.Conv2d(64,1, kernel_size=3, stride=1, padding=1)
+        self.semantic_3 = nn.Conv2d(64,3,kernel_size=3,stride=1,padding=1)
+        self.semantic_branch = models.resnet18()
+        self.semantic_branch.fc=nn.Identity()
+        #nn.Sequential(nn.Conv2d(64,128, kernel_size=3,stride=2,padding=1), nn.ReLU(),
+        #                                  nn.BatchNorm2d(128),nn.MaxPool2d(kernel_size=3,stride=2,padding=1),nn.Conv2d(128,256,kernel_size=3,stride=2,padding=1))
+        #self.semantic = nn.Sequential(nn.COnv2d(150,64, kernel_size=3, stride=2, padding=1), nn.ReLU(),nn.BatchNorm2d(64), nn.Conv2d(64,32, kernel_size=3,stride=2, padding=1))
+        
+        self.softmax = nn.Softmax(dim=-1)
+        print('successful load trunk2')
+    def forward(self,data):
+        #print(data)
+        #print(label)
+        #torch.set_printoptions(threshold=10000)
+        batch_size = data.size()[0]
+        context = data[:,:,:256,:]
+        body = data[:,:,256:512,:]
+        semantic = data[:,:,512:768,:]
+        semantic = convert_color_to_index(semantic)
+        ##semantic = semantic.resize(batch_size, 150)        #sys.exit()
+        #print('test')
+        semantic= self.semantic(semantic)
+        context = context * self.attention(semantic)
+        feature_context = self.trunk_context(context)
+        feature_body = self.trunk_body(body)
+        #feature_semantic = self.Lift(torch.mean(self.LSTM(semantic.permute(0,2,1))[0].permute(0,2,1),dim=-2)) #32,150,32
+        feature_semantic = self.semantic_branch(self.semantic_3(semantic))
+        
+        #feature_semantic = feature_semantic*feature_semantic
+        feature = self.embedding(torch.cat([feature_context,feature_body,feature_semantic], dim=1))
+        #feature = self.embedding(feature_body)
+        #print(feature.size())
+        return feature
 
 # This is for replacing the last layer of a pretrained network.
 # This code is from https://github.com/KevinMusgrave/powerful_benchmarker
@@ -196,16 +280,16 @@ def train_app(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Set trunk model and replace the softmax layer with an identity function
-    trunk = torchvision.models.__dict__[cfg.model.model_name](pretrained=cfg.model.pretrained)
-    
+    #trunk = torchvision.models.__dict__[cfg.model.model_name](pretrained=cfg.model.pretrained)
+    trunk = trunk_2(cfg)
     #resnet18(pretrained=True)
     #trunk = models.alexnet(pretrained=True)
     #trunk = models.resnet50(pretrained=True)
     #trunk = models.resnet152(pretrained=True)
     #trunk = models.wide_resnet50_2(pretrained=True)
     #trunk = EfficientNet.from_pretrained('efficientnet-b2')
-    trunk_output_size = trunk.fc.in_features
-    trunk.fc = Identity()
+    trunk_output_size = 512
+    #trunk.fc = Identity()
     trunk = torch.nn.DataParallel(trunk.to(device))
 
     embedder = torch.nn.DataParallel(MLP([trunk_output_size, cfg.embedder.size]).to(device))
@@ -224,10 +308,13 @@ def train_app(cfg):
 
 
     # Set the datasets
-    data_dir = os.environ["DATASET_FOLDER"]+"/"+cfg.dataset.data_dir
-    print("Data dir: "+data_dir)
+    #data_dir = os.environ["DATASET_FOLDER"]+"/"+cfg.dataset.data_dir
+    #print("Data dir: "+data_dir)
 
-    train_dataset, val_dataset, val_samples_dataset = get_datasets(data_dir, cfg, mode=cfg.mode.type)
+    #train_dataset, val_dataset, val_samples_dataset = get_datasets(data_dir, cfg, mode=cfg.mode.type)
+    train_dataset = Emotic_DataLoader(cfg, 'Train', 3)
+    val_dataset = Emotic_DataLoader(cfg, 'Test', 3)
+    val_samples_dataset = Emotic_DataLoader(cfg, 'Samples',3)
     print("Trainset: ",len(train_dataset), "Testset: ",len(val_dataset), "Samplesset: ",len(val_samples_dataset))
 
     # Set the loss function
@@ -274,7 +361,7 @@ def train_app(cfg):
             "trunk_scheduler_by_epoch": torch.optim.lr_scheduler.StepLR(embedder_optimizer, cfg.scheduler.step_size, gamma=cfg.scheduler.gamma),
             }
 
-    experiment_name = "%s_model_%s_cl_%s_ml_%s_miner_%s_mix_ml_%02.2f_mix_cl_%02.2f_resize_%d_emb_size_%d_class_size_%d_opt_%s_lr_%02.2f_m_%02.2f_wd_%02.2f"%(cfg.dataset.name,
+    experiment_name = "d_emocat73_fc_lr_stepsize_10_%s_model_%s_cl_%s_ml_%s_miner_%s_mix_ml_%02.2f_mix_cl_%02.2f_resize_%d_emb_size_%d_class_size_%d_opt_%s_lr_%02.2f_m_%02.2f_wd_%02.2f"%(cfg.dataset.name,
                                                                                                   cfg.model.model_name, 
                                                                                                   "cross_entropy", 
                                                                                                   cfg.embedder_loss.name, 
@@ -299,7 +386,7 @@ def train_app(cfg):
             #size_of_tsne=20
             )
     #tester.embedding_filename=data_dir+"/embeddings_pretrained_triplet_loss_multi_similarity_miner.pkl"
-    tester.embedding_filename=data_dir+"/"+experiment_name+".pkl"
+    tester.embedding_filename='/home/kpeng/oneshot_metriclearning/emotic_dml/models'+"/"+experiment_name+".pkl"
     end_of_epoch_hook = hooks.end_of_epoch_hook(tester, dataset_dict, model_folder)
     trainer = trainers.TrainWithClassifier(models,
             optimizers,

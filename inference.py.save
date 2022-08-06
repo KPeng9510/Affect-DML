@@ -1,0 +1,86 @@
+import torch
+import cv2
+from torchvision import datasets, transforms
+from skimage import io
+import os
+from pathlib import Path
+import numpy as np
+import sys
+import time
+from torch.utils.data import Dataset
+
+# The testing module requires faiss
+# So if you don't have that, then this import will break
+from trunk_baseline import Emotic
+from pytorch_metric_learning import losses, miners, samplers, trainers, testers, utils
+import torch.nn as nn
+from emotic_d import Emotic_DataLoader
+import record_keeper
+import pytorch_metric_learning.utils.logging_presets as logging_presets
+from torchvision import datasets, models, transforms
+import torchvision
+import logging
+logging.getLogger().setLevel(logging.INFO)
+import os
+from scipy.io import loadmat
+import pytorch_metric_learning
+from pytorch_metric_learning.testers.base_tester import BaseTester
+#from resnet import resnet18
+
+logging.info("pytorch-metric-learning VERSION %s"%pytorch_metric_learning.__version__)
+logging.info("record_keeper VERSION %s"%record_keeper.__version__)
+
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+#from efficientnet_pytorch import EfficientNet
+import torch
+import numpy as np
+import pickle
+
+
+def recursive_glob(rootdir=".", suffix=".png"):
+    return [
+        os.path.join(looproot,filename)
+        for looproot,_, filenames in os.walk(rootdir)
+        for filename in filenames
+        if filename.endswith(suffix)
+    ]
+
+def do_knn_and_accuracies(self, accuracies, embeddings_and_labels, split_name, tag_suffix=''):
+    #print(embeddings_and_labels)
+    query_embeddings = embeddings_and_labels["val"][0]
+    query_labels = embeddings_and_labels["val"][1]
+    reference_embeddings = embeddings_and_labels["samples"][0]
+    reference_labels = embeddings_and_labels["samples"][1]
+    #print(reference_labels)
+    knn_indices, knn_distances = utils.stat_utils.get_knn(reference_embeddings, query_embeddings, 1, False)
+    knn_labels = reference_labels[knn_indices][:,0]
+    torch.set_printoptions(threshold=10000)
+    np.set_printoptions(threshold=sys.maxsize)
+    #print((knn_labels!=7).sum())
+    torch.set_printoptions(threshold=10000)
+    accuracy = accuracy_score(query_labels, knn_labe
+       #print(knn_labels)
+        acc_all = cal_acc(knn_labels.flatten().tolist(), query_labels.flatten().tolist())
+        #print(classification_report(knn_labels, query_labels, labels=[7,8,9,10,11,12]))
+        #cm = confusion_matrix(knn_labels, query_labels)
+        #per_class_accuracies = {}
+        #classes = [7,8,9,10,11,12]
+        #for idx, cls in enumerate(classes):
+        #    # True negatives are all the samples that are not our current GT class (not the current row)
+        #    # and were not predicted as the current class (not the current column)
+        #    true_negatives = np.sum(np.delete(np.delete(cm, idx, axis=0), idx, axis=1))
+        #
+        #    # True positives are all the samples of our current GT class that were predicted as such
+        #    true_positives = cm[idx, idx]
+        #
+        #    # The accuracy for the current class is ratio between correct predictions to all predictions
+        #    per_class_accuracies[cls] = (true_positives + true_negatives) / np.sum(cm)
+        print(acc_all)
+        print(accuracy)
+        with open(self.embedding_filename+"_last", 'wb') as f:
+            print("Dumping embeddings for new max_acc to file", self.embedding_filename+"_last")
+            pickle.dump([query_embeddings, query_labels, reference_embeddings, reference_labels, accuracy], f)
+        accuracies["accuracy"] = accuracy
+        keyname = self.accuracies_keyname("mean_average_precision_at_r") # accuracy as keyname not working
+        accuracies[keyname] = accuracy
+
